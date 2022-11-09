@@ -12,3 +12,6 @@ clap = { version = "4.0", features = ["derive"] }
 yahoo_finance_api = { version = "1" }
 tokio = { version = "1", features = ["full"] }
 async-trait = { version = "0.1" }
+futures = { version = "0.3" }
+log = { version = "0.4" }
+simple_logger = { version = "4" }

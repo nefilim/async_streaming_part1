@@ -1,8 +1,12 @@
 use chrono::prelude::*;
 use clap::Parser;
 use std::io::{Error, ErrorKind};
+use std::time::Duration;
 use yahoo_finance_api as yahoo;
 use async_trait::async_trait;
+use simple_logger::SimpleLogger;
+use log::{error, info};
+use futures::future::FutureExt;
 
 #[derive(Parser, Debug)]
 #[clap(
@@ -160,35 +164,60 @@ async fn fetch_closing_data(
     }
 }
 
+struct ClosingData<'a> {
+    symbol: &'a str,
+    from: DateTime<Utc>,
+    closes: Vec<f64>
+}
+
+fn process_closing_data(result: &ClosingData) {
+    // min/max of the period. unwrap() because those are Option types
+    let period_max: f64 = max(&result.closes).unwrap();
+    let period_min: f64 = min(&result.closes).unwrap();
+    let last_price = *result.closes.last().unwrap_or(&0.0);
+    let (_, pct_change) = price_diff(&result.closes).unwrap_or((0.0, 0.0));
+    let sma = n_window_sma(30, &result.closes).unwrap_or_default();
+
+    // a simple way to output CSV data
+    info!(
+        "{},{},${:.2},{:.2}%,${:.2},${:.2},${:.2}",
+        result.from.to_rfc3339(),
+        result.symbol,
+        last_price,
+        pct_change * 100.0,
+        period_min,
+        period_max,
+        sma.last().unwrap_or(&0.0)
+    );
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    SimpleLogger::new().env().init().unwrap();
+
     let opts = Opts::parse();
     let from: DateTime<Utc> = opts.from.parse().expect("Couldn't parse 'from' date");
     let to = Utc::now();
 
     // a simple way to output a CSV header
     println!("period start,symbol,price,change %,min,max,30d avg");
-    for symbol in opts.symbols.split(',') {
-        let closes = fetch_closing_data(&symbol, &from, &to).await?;
-        if !closes.is_empty() {
-                // min/max of the period. unwrap() because those are Option types
-                let period_max: f64 = max(&closes).unwrap();
-                let period_min: f64 = min(&closes).unwrap();
-                let last_price = *closes.last().unwrap_or(&0.0);
-                let (_, pct_change) = price_diff(&closes).unwrap_or((0.0, 0.0));
-                let sma = n_window_sma(30, &closes).unwrap_or_default();
+    let mut ticker = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        ticker.tick().await;
+        let data = opts.symbols.split(',').map( |symbol| {
+            fetch_closing_data(&symbol, &from, &to).map( move |c| {
+                match c {
+                    Ok(closes_vec) => Some(ClosingData { symbol: &symbol, from, closes: closes_vec }),
+                    Err(e) => {
+                        error!("failed to get data for {symbol}: {e}");
+                        None
+                    }
+                }
 
-            // a simple way to output CSV data
-            println!(
-                "{},{},${:.2},{:.2}%,${:.2},${:.2},${:.2}",
-                from.to_rfc3339(),
-                symbol,
-                last_price,
-                pct_change * 100.0,
-                period_min,
-                period_max,
-                sma.last().unwrap_or(&0.0)
-            );
+            })
+        });
+        for r in futures::future::join_all(data).await.into_iter().flatten().collect::<Vec<ClosingData>>() {
+            process_closing_data(&r);
         }
     }
     Ok(())
